@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.granite/
+*.ait
+.rsbuild/
+.env
+.env.local
