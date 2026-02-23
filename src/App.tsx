@@ -1,10 +1,10 @@
-﻿import { useCallback, useEffect, useMemo, useState } from 'react';
-import { DeviceViewport } from './components';
-import { getMenuRecommendation } from './utils/recommendation';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { DeviceViewport, BannerAd } from './components';
+import { getMenuRecommendation, getRecommendationPoolInfo } from './utils/recommendation';
 import { MENU_CATALOG } from './data/menu-catalog';
 import {
   AppScreen,
-  BudgetLevel,
+  CuisineFilter,
   DailyState,
   DietType,
   HistoryItem,
@@ -45,10 +45,11 @@ const MAX_ATTEMPTS = 4;
 const MAX_HISTORY = 80;
 
 const MEAL_TIME_OPTIONS: MealTime[] = ['아침', '점심', '저녁', '야식'];
-const PEOPLE_OPTIONS = [1, 2, 3, 4, 5, 6, 8, 10, 12];
 const SPICE_OPTIONS: SpiceLevel[] = ['순한맛', '보통', '매운맛', '매우매운맛'];
-const BUDGET_OPTIONS: BudgetLevel[] = ['저예산', '보통', '넉넉함'];
+const CUISINE_OPTIONS: CuisineFilter[] = ['전체', '한식', '일식', '중식', '양식', '분식', '건강식', '기타'];
+const QUICK_BUDGET_OPTIONS = [8000, 10000, 12000, 15000, 18000];
 const DIET_OPTIONS: DietType[] = ['전체', '채식', '고단백', '저탄수', '저칼로리'];
+const COMMON_AVOID_INGREDIENTS = ['마늘', '양파', '버섯', '우유', '새우'];
 
 const TABS: { key: AppScreen; icon: string; title: string }[] = [
   { key: '추천', icon: 'ri-restaurant-line', title: '추천' },
@@ -96,6 +97,35 @@ function scoreToWarmth(score: number): { label: string; className: string } {
 function WarmthBadge({ score }: { score: number }) {
   const { label, className } = scoreToWarmth(score);
   return <span className={`warmth-badge ${className}`}>{label}</span>;
+}
+
+function formatPriceBandEstimate(priceBand: MenuItem['priceBand']) {
+  if (priceBand === '저예산') return '약 8천원대';
+  if (priceBand === '보통') return '약 1.1만원대';
+  return '약 1.6만원대';
+}
+
+function isPopularMenuName(name: string) {
+  const popularKeywords = [
+    '김치찌개',
+    '된장찌개',
+    '돈까스',
+    '떡볶이',
+    '비빔밥',
+    '국밥',
+    '우동',
+    '라면',
+    '볶음밥',
+    '카레',
+    '파스타',
+    '김밥',
+    '제육',
+    '순두부',
+    '국수',
+    '찌개',
+  ];
+
+  return popularKeywords.some((keyword) => name.includes(keyword));
 }
 
 function StatCard({
@@ -149,8 +179,9 @@ function MenuCard({
 
       <div className="menu-meta-row">
         <span className="menu-meta-badge">{menu.cuisine}</span>
-        <span className="menu-meta-badge">{menu.priceBand}</span>
+        <span className="menu-meta-badge">{formatPriceBandEstimate(menu.priceBand)}</span>
         <span className="menu-meta-badge">{menu.difficulty}</span>
+        {isPopularMenuName(menu.name) ? <span className="menu-meta-badge emphasize">대중 메뉴</span> : null}
       </div>
 
       <p className="menu-spec">
@@ -171,20 +202,26 @@ function MenuCard({
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppScreen>('추천');
   const [mealTime, setMealTime] = useState<MealTime>('점심');
+  const [cuisine, setCuisine] = useState<CuisineFilter>('전체');
   const [people, setPeople] = useState(2);
+  const [budgetPerPerson, setBudgetPerPerson] = useState(12000);
   const [spice, setSpice] = useState<SpiceLevel>('보통');
-  const [budget, setBudget] = useState<BudgetLevel>('보통');
   const [dietType, setDietType] = useState<DietType>('전체');
   const [cookingMinutesMax, setCookingMinutesMax] = useState(30);
   const [avoidText, setAvoidText] = useState('');
   const [avoidIngredients, setAvoidIngredients] = useState<string[]>([]);
+  const [showDetailFilters, setShowDetailFilters] = useState(false);
   const [dailyState, setDailyState] = useState<DailyState | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [favorites, setFavorites] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
 
-  const { showInterstitialAd } = useInterstitialAd('ait-ad-test-interstitial-id');
+  const {
+    loading: isAdLoading,
+    supported: isAdSupported,
+    showInterstitialAd,
+  } = useInterstitialAd();
 
   const menuByName = useMemo(() => {
     const map = new Map<string, string>();
@@ -192,17 +229,24 @@ export default function App() {
     return map;
   }, []);
 
+  const menuIdByName = useMemo(() => {
+    const map = new Map<string, string>();
+    MENU_CATALOG.forEach((menu) => map.set(menu.name, menu.id));
+    return map;
+  }, []);
+
   const input: RecommendInput = useMemo(
     () => ({
       mealTime,
+      cuisine,
       people,
+      budgetPerPerson: Math.max(5000, Math.min(50000, budgetPerPerson)),
       spice,
-      budget,
       dietType,
       avoidIngredients,
       cookingMinutesMax: Math.max(5, Math.min(240, cookingMinutesMax)),
     }),
-    [mealTime, people, spice, budget, dietType, avoidIngredients, cookingMinutesMax],
+    [mealTime, cuisine, people, budgetPerPerson, spice, dietType, avoidIngredients, cookingMinutesMax],
   );
 
   const signature = useMemo(() => createInputSignature(input), [input]);
@@ -240,6 +284,24 @@ export default function App() {
     () => MENU_CATALOG.filter((menu) => favorites.includes(menu.id)),
     [favorites],
   );
+
+  const recent7DayUsedIds = useMemo(() => {
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const candidates = history
+      .filter((item) => new Date(item.createdAt).getTime() >= sevenDaysAgo)
+      .map((item) => menuIdByName.get(item.menuName))
+      .filter((id): id is string => Boolean(id));
+
+    return dedupe(candidates);
+  }, [history, menuIdByName]);
+
+  const recommendationPool = useMemo(
+    () => getRecommendationPoolInfo(MENU_CATALOG, input, todayState.usedIds ?? [], recent7DayUsedIds),
+    [input, todayState.usedIds, recent7DayUsedIds],
+  );
+
+  const shouldShowRetryAd =
+    todayState.attempt > 0 && todayState.attempt < todayState.maxAttempts;
 
   useEffect(() => {
     let mounted = true;
@@ -314,6 +376,33 @@ export default function App() {
     setMessage('조건을 초기화했습니다.');
   };
 
+  const applyRelaxSuggestion = (
+    action:
+      | 'more-time'
+      | 'clear-avoid'
+      | 'more-budget'
+      | 'all-cuisine',
+  ) => {
+    if (action === 'more-time') {
+      setCookingMinutesMax((prev) => Math.min(240, Math.max(5, prev + 10)));
+    }
+
+    if (action === 'more-budget') {
+      setBudgetPerPerson((prev) => Math.min(50000, prev + 2000));
+    }
+
+    if (action === 'all-cuisine') {
+      setCuisine('전체');
+    }
+
+    if (action === 'clear-avoid') {
+      setAvoidIngredients([]);
+      setAvoidText('');
+    }
+
+    setMessage('선택 폭을 넓혔어요. 다시 추천을 눌러보세요.');
+  };
+
   const createRecommendation = useCallback(async () => {
     const now = getTodayKey();
     const base =
@@ -326,7 +415,13 @@ export default function App() {
       return;
     }
 
-    const result = getMenuRecommendation(MENU_CATALOG, input, base.usedIds ?? [], 3);
+    const result = getMenuRecommendation(
+      MENU_CATALOG,
+      input,
+      base.usedIds ?? [],
+      5,
+      recent7DayUsedIds,
+    );
 
     if (!result.picked) {
       setMessage(result.fallbackReason || '조건에 맞는 메뉴가 없습니다.');
@@ -377,7 +472,7 @@ export default function App() {
     setHistory((prev) => [historyItem, ...prev].slice(0, MAX_HISTORY));
 
     setMessage(result.fallbackReason || '추천이 완료되었습니다.');
-  }, [dailyState, todayState, input, isStateValid, signature]);
+  }, [dailyState, todayState, input, isStateValid, recent7DayUsedIds, signature]);
 
   const handleRecommend = useCallback(() => {
     if (isGenerating) {
@@ -385,14 +480,22 @@ export default function App() {
     }
 
     setIsGenerating(true);
-    showInterstitialAd({
-      onDismiss: () => {
-        void createRecommendation().finally(() => {
-          setIsGenerating(false);
-        });
-      },
-    });
-  }, [createRecommendation, isGenerating, showInterstitialAd]);
+
+    const runRecommendation = () => {
+      void createRecommendation().finally(() => {
+        setIsGenerating(false);
+      });
+    };
+
+    if (shouldShowRetryAd) {
+      showInterstitialAd({
+        onDismiss: runRecommendation,
+      });
+      return;
+    }
+
+    runRecommendation();
+  }, [createRecommendation, isGenerating, shouldShowRetryAd, showInterstitialAd]);
 
   const handleClearHistory = async () => {
     await clearHistory();
@@ -436,9 +539,56 @@ export default function App() {
             <div className="panel-card">
               <h2 className="section-title">입력 조건</h2>
 
+              <div className="pool-hint" role="status" aria-live="polite">
+                <span className="pool-pill">추천 가능한 메뉴 {recommendationPool.strictCount}개</span>
+                <span className="pool-pill">대중 메뉴 우선 추천</span>
+                <span className="pool-pill">최근 본 메뉴는 덜 보여줘요</span>
+                <span className="pool-pill">선택값: {cuisine} · {budgetPerPerson.toLocaleString()}원</span>
+              </div>
+
+              {recommendationPool.strictCount <= 2 ? (
+                <div className="relax-hint-box">
+                  <p className="relax-hint-title">
+                    {recommendationPool.strictCount === 0
+                      ? '조건이 조금 까다로워요. 선택 폭을 살짝 넓혀볼까요?'
+                      : '선택지가 적어요. 아래 버튼으로 쉽게 넓힐 수 있어요.'}
+                  </p>
+                  <div className="relax-hint-actions">
+                    <button
+                      type="button"
+                      className="quick-chip"
+                      onClick={() => applyRelaxSuggestion('more-budget')}
+                    >
+                      1인 예산 +2천원
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-chip"
+                      onClick={() => applyRelaxSuggestion('all-cuisine')}
+                    >
+                      카테고리 넓히기
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-chip"
+                      onClick={() => applyRelaxSuggestion('more-time')}
+                    >
+                      조리시간 +10분
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-chip"
+                      onClick={() => applyRelaxSuggestion('clear-avoid')}
+                    >
+                      기피재료 비우기
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               <div className="field-group">
                 <label>식사 시간</label>
-                <div className="chip-grid">
+                <div className="chip-grid compact-grid">
                   {MEAL_TIME_OPTIONS.map((value) => (
                     <button
                       type="button"
@@ -447,6 +597,52 @@ export default function App() {
                       onClick={() => setMealTime(value)}
                     >
                       {value}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field-group">
+                <label>카테고리</label>
+                <div className="chip-grid compact-grid">
+                  {CUISINE_OPTIONS.map((value) => (
+                    <button
+                      type="button"
+                      key={value}
+                      className={`chip ${cuisine === value ? 'active' : ''}`}
+                      onClick={() => setCuisine(value)}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field-group">
+                <label>1인 예산(원)</label>
+                <input
+                  type="number"
+                  className="number-input"
+                  min={5000}
+                  max={50000}
+                  step={500}
+                  value={budgetPerPerson}
+                  onChange={(event) => {
+                    const parsed = Number(event.target.value);
+                    if (Number.isFinite(parsed)) {
+                      setBudgetPerPerson(Math.max(5000, Math.min(50000, parsed)));
+                    }
+                  }}
+                />
+                <div className="quick-wrap">
+                  {QUICK_BUDGET_OPTIONS.map((value) => (
+                    <button
+                      type="button"
+                      key={`budget-${value}`}
+                      className="quick-chip"
+                      onClick={() => setBudgetPerPerson(value)}
+                    >
+                      {value.toLocaleString()}원
                     </button>
                   ))}
                 </div>
@@ -473,135 +669,158 @@ export default function App() {
                     <i className="ri-add-line" />
                   </button>
                 </div>
-                <div className="quick-wrap">
-                  {PEOPLE_OPTIONS.map((value) => (
-                    <button
-                      type="button"
-                      key={`people-${value}`}
-                      className="quick-chip"
-                      onClick={() => setPeople(value)}
-                    >
-                      {value}인
-                    </button>
-                  ))}
-                </div>
               </div>
 
-              <div className="field-group">
-                <label>원하는 매운맛</label>
-                <div className="chip-grid">
-                  {SPICE_OPTIONS.map((value) => (
-                    <button
-                      type="button"
-                      key={value}
-                      className={`chip ${spice === value ? 'active' : ''}`}
-                      onClick={() => setSpice(value)}
-                    >
-                      {value}
-                    </button>
-                  ))}
-                </div>
+              <div className="detail-toggle-row">
+                <button
+                  type="button"
+                  className="outline-btn detail-toggle-btn"
+                  onClick={() => setShowDetailFilters((prev) => !prev)}
+                >
+                  {showDetailFilters ? '상세 설정 접기' : '상세 설정 열기'}
+                </button>
+                <p className="detail-toggle-note">매운맛/식단/조리시간/기피재료는 상세 설정에서 조정</p>
               </div>
 
-              <div className="field-group">
-                <label>예산</label>
-                <div className="chip-grid">
-                  {BUDGET_OPTIONS.map((value) => (
-                    <button
-                      type="button"
-                      key={value}
-                      className={`chip ${budget === value ? 'active' : ''}`}
-                      onClick={() => setBudget(value)}
-                    >
-                      {value}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {showDetailFilters ? (
+                <>
+                  <div className="field-group">
+                    <label>원하는 매운맛</label>
+                    <div className="chip-grid compact-grid">
+                      {SPICE_OPTIONS.map((value) => (
+                        <button
+                          type="button"
+                          key={value}
+                          className={`chip ${spice === value ? 'active' : ''}`}
+                          onClick={() => setSpice(value)}
+                        >
+                          {value}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
-              <div className="field-group">
-                <label>식단 성향</label>
-                <div className="chip-grid">
-                  {DIET_OPTIONS.map((value) => (
-                    <button
-                      type="button"
-                      key={value}
-                      className={`chip ${dietType === value ? 'active' : ''}`}
-                      onClick={() => setDietType(value)}
-                    >
-                      {value}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                  <div className="field-group">
+                    <label>식단 성향</label>
+                    <div className="chip-grid compact-grid">
+                      {DIET_OPTIONS.map((value) => (
+                        <button
+                          type="button"
+                          key={value}
+                          className={`chip ${dietType === value ? 'active' : ''}`}
+                          onClick={() => setDietType(value)}
+                        >
+                          {value}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
-              <div className="field-group">
-                <label>최대 조리 시간(분)</label>
-                <input
-                  type="number"
-                  className="number-input"
-                  min={5}
-                  max={240}
-                  value={cookingMinutesMax}
-                  onChange={(event) => setCookingMinutesMax(Number(event.target.value))}
-                />
-              </div>
+                  <div className="field-group">
+                    <label>최대 조리 시간(분)</label>
+                    <input
+                      type="number"
+                      className="number-input"
+                      min={5}
+                      max={240}
+                      value={cookingMinutesMax}
+                      onChange={(event) => setCookingMinutesMax(Number(event.target.value))}
+                    />
+                  </div>
 
-              <div className="field-group">
-                <label>피하고 싶은 재료</label>
-                <div className="avoid-input-row">
-                  <input
-                    value={avoidText}
-                    onChange={(event) => setAvoidText(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        addAvoidIngredient();
-                      }
-                    }}
-                    className="avoid-input"
-                    placeholder="예: 마늘, 양파"
-                  />
-                  <button
-                    type="button"
-                    className="add-btn"
-                    onClick={addAvoidIngredient}
-                    disabled={!avoidText.trim()}
-                  >
-                    추가
-                  </button>
-                </div>
-                {avoidIngredients.length > 0 && (
-                  <div className="tag-list">
-                    {avoidIngredients.map((item) => (
+                  <div className="field-group">
+                    <label>피하고 싶은 재료</label>
+                    <div className="avoid-input-row">
+                      <input
+                        value={avoidText}
+                        onChange={(event) => setAvoidText(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            addAvoidIngredient();
+                          }
+                        }}
+                        className="avoid-input"
+                        placeholder="예: 마늘, 양파"
+                      />
                       <button
                         type="button"
-                        key={item}
-                        className="tag-chip dismissible"
-                        onClick={() => removeAvoidIngredient(item)}
-                        aria-label={`${item} 제거`}
+                        className="add-btn"
+                        onClick={addAvoidIngredient}
+                        disabled={!avoidText.trim()}
                       >
-                        {item}
-                        <i className="ri-close-line" />
+                        추가
                       </button>
-                    ))}
+                    </div>
+                    <div className="quick-wrap">
+                      {COMMON_AVOID_INGREDIENTS.map((item) => (
+                        <button
+                          type="button"
+                          key={`avoid-${item}`}
+                          className="quick-chip"
+                          onClick={() => setAvoidIngredients((prev) => dedupe([...prev, item]))}
+                        >
+                          {item} 제외
+                        </button>
+                      ))}
+                    </div>
+                    {avoidIngredients.length > 0 && (
+                      <div className="tag-list">
+                        {avoidIngredients.map((item) => (
+                          <button
+                            type="button"
+                            key={item}
+                            className="tag-chip dismissible"
+                            onClick={() => removeAvoidIngredient(item)}
+                            aria-label={`${item} 제거`}
+                          >
+                            {item}
+                            <i className="ri-close-line" />
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                </>
+              ) : (
+                <p className="detail-collapsed-note">
+                  초간편 모드: 식사시간·카테고리·1인예산·인원만으로 빠르게 추천합니다.
+                </p>
+              )}
 
               <div className="actions">
                 <button
                   type="button"
                   className="primary-btn"
                   onClick={handleRecommend}
-                  disabled={isGenerating || todayState.attempt >= todayState.maxAttempts}
+                  disabled={
+                    isGenerating ||
+                    todayState.attempt >= todayState.maxAttempts ||
+                    (shouldShowRetryAd && isAdSupported && isAdLoading)
+                  }
                 >
-                  <i className="ri-restaurant-2-line" />
-                  {todayState.attempt >= todayState.maxAttempts ? '오늘 추천 완료' : '메뉴 추천 받기'}
+                  <span className="primary-btn-content">
+                    <i className="ri-restaurant-2-line" />
+                    <span>
+                      {todayState.attempt >= todayState.maxAttempts
+                        ? '오늘 추천 완료'
+                        : shouldShowRetryAd
+                          ? '다시 뽑기'
+                          : '메뉴 추천 받기'}
+                    </span>
+                    {shouldShowRetryAd ? <span className="ad-action-badge">AD</span> : null}
+                  </span>
                 </button>
                 <button type="button" className="outline-btn" onClick={resetStateForInput}>
                   조건 초기화
                 </button>
+                <p className="action-note">
+                  {shouldShowRetryAd
+                    ? isAdSupported
+                      ? '다시 뽑기는 AD 배지가 붙은 전면 광고 후 보여줘요.'
+                      : '현재 환경에서는 광고를 지원하지 않아 다시 뽑기를 바로 진행해요.'
+                    : '첫 추천은 광고 없이 바로 제공돼요.'}
+                </p>
               </div>
 
               {message ? <p className="result-message">{message}</p> : null}
@@ -643,6 +862,8 @@ export default function App() {
                 <p className="empty-message">아직 추천 결과가 없습니다. 먼저 추천을 받아보세요.</p>
               )}
             </div>
+
+            <BannerAd adGroupId="ait.v2.live.b197024c410b4237" />
           </section>
         )}
 
